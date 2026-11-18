@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { getOpenRouterClient, MODEL } from "@/lib/ai/client";
+import { runChatCompletion } from "@/lib/ai/chat-completion";
 import { buildSystemPrompt } from "@/lib/ai/prompt";
+import { buildSearchQuery } from "@/lib/ai/search-query";
 import {
   KnowledgeIndexNotFoundError,
   buildContextBlock,
@@ -87,8 +89,11 @@ export async function POST(request: Request) {
     return errorResponse("Envie uma lista válida de mensagens.", 400);
   }
 
-  // A última mensagem é garantidamente do usuário (ver sanitizeMessages acima).
-  const question = messages[messages.length - 1].content;
+  // ponytail: a busca no RAG considera o histórico (ver `buildSearchQuery`):
+  // uma pergunta curta de acompanhamento ("e o prazo?") é buscada junto com o
+  // assunto das últimas perguntas do usuário. O modelo, por sua vez, já recebe
+  // o histórico inteiro mais abaixo.
+  const question = buildSearchQuery(messages);
 
   let context: string | null = null;
   try {
@@ -109,23 +114,17 @@ export async function POST(request: Request) {
   }
 
   try {
-    const completion = await getOpenRouterClient().chat.completions.create({
+    // ponytail: a chamada única ao modelo virou `runChatCompletion`, que
+    // também atende pedidos de ferramenta (ex.: search_active_items) com limite
+    // de rodadas. Sem pedido de ferramenta, é exatamente uma chamada, como antes.
+    const reply = await runChatCompletion({
+      client: getOpenRouterClient(),
       model: MODEL,
-      temperature: 0.4,
-      // ponytail: 800 (e não 500) porque muitos modelos :free da OpenRouter
-      // emitem um campo `reasoning` que CONTA no orçamento — com 500, um
-      // modelo que "pensa" muito devolvia content:null e o chat respondia
-      // "A IA não retornou uma resposta." Ainda é curto: é uma janela de chat.
-      // Para modelos de raciocínio pesado, prefira subir isto ou trocar por um
-      // modelo sem reasoning (ver OPENROUTER_MODEL no .env.example).
-      max_tokens: 800,
       messages: [
         { role: "system", content: buildSystemPrompt(context) },
         ...messages,
       ],
     });
-
-    const reply = completion.choices[0]?.message?.content?.trim();
     if (!reply) {
       return errorResponse("A IA não retornou uma resposta.", 502);
     }
@@ -156,7 +155,7 @@ export async function POST(request: Request) {
         : undefined;
     if (status === 402) {
       return errorResponse(
-        "A conta da OpenRouter está sem créditos. Adicione créditos em openrouter.ai/settings/credits ou configure um modelo gratuito (sufixo \":free\") em OPENROUTER_MODEL, no .env.",
+        'A conta da OpenRouter está sem créditos. Adicione créditos em openrouter.ai/settings/credits ou configure um modelo gratuito (sufixo ":free") em OPENROUTER_MODEL, no .env.',
         502,
       );
     }
