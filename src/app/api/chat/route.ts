@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getOpenRouterClient, MODEL } from "@/lib/ai/client";
 import { runChatCompletion } from "@/lib/ai/chat-completion";
 import { buildSystemPrompt } from "@/lib/ai/prompt";
+import { buildSearchQuery } from "@/lib/ai/search-query";
 import {
   KnowledgeIndexNotFoundError,
   buildContextBlock,
@@ -88,8 +89,11 @@ export async function POST(request: Request) {
     return errorResponse("Envie uma lista válida de mensagens.", 400);
   }
 
-  // A última mensagem é garantidamente do usuário (ver sanitizeMessages acima).
-  const question = messages[messages.length - 1].content;
+  // ponytail: a busca no RAG considera o histórico (ver `buildSearchQuery`):
+  // uma pergunta curta de acompanhamento ("e o prazo?") é buscada junto com o
+  // assunto das últimas perguntas do usuário. O modelo, por sua vez, já recebe
+  // o histórico inteiro mais abaixo.
+  const question = buildSearchQuery(messages);
 
   let context: string | null = null;
   try {

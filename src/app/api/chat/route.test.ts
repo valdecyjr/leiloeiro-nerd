@@ -188,6 +188,35 @@ describe("POST /api/chat", () => {
       expect(systemPrompt).toContain("knowledge/faq/participacao.md");
     });
 
+    it("pergunta de acompanhamento é buscada junto com o assunto das perguntas anteriores", async () => {
+      aiReplies("resposta");
+
+      await POST(
+        makeRequest({
+          messages: [
+            {
+              role: "user",
+              content: "Como funciona o pagamento do item que ganhei?",
+            },
+            { role: "assistant", content: "Você paga via PIX." },
+            { role: "user", content: "e o prazo?" },
+          ],
+        }),
+      );
+
+      expect(searchKnowledge).toHaveBeenCalledWith(
+        "Como funciona o pagamento do item que ganhei? e o prazo?",
+      );
+      // O modelo continua recebendo o histórico completo, e não só o texto da busca.
+      const sent = create.mock.calls[0][0].messages;
+      expect(sent.map((m: { role: string }) => m.role)).toEqual([
+        "system",
+        "user",
+        "assistant",
+        "user",
+      ]);
+    });
+
     it("quando nada relevante é encontrado, avisa a IA em vez de inventar contexto", async () => {
       aiReplies("não encontrei essa informação");
       searchKnowledge.mockResolvedValue([]);
@@ -347,15 +376,13 @@ describe("POST /api/chat", () => {
       ofManyItems.mockResolvedValue(
         new Map([["item-1", { total: 2, highestBid: 15_000 }]]),
       );
-      create
-        .mockResolvedValueOnce(toolRequest)
-        .mockResolvedValueOnce({
-          choices: [
-            {
-              message: { content: "Cartas raras está com lance de R$ 150,00." },
-            },
-          ],
-        });
+      create.mockResolvedValueOnce(toolRequest).mockResolvedValueOnce({
+        choices: [
+          {
+            message: { content: "Cartas raras está com lance de R$ 150,00." },
+          },
+        ],
+      });
 
       const res = await POST(
         makeRequest({
@@ -396,11 +423,9 @@ describe("POST /api/chat", () => {
       listActiveWithSeller.mockRejectedValue(
         new Error("password authentication failed for user admin"),
       );
-      create
-        .mockResolvedValueOnce(toolRequest)
-        .mockResolvedValueOnce({
-          choices: [{ message: { content: "Não consegui consultar agora." } }],
-        });
+      create.mockResolvedValueOnce(toolRequest).mockResolvedValueOnce({
+        choices: [{ message: { content: "Não consegui consultar agora." } }],
+      });
 
       const res = await POST(makeRequest(validBody));
 

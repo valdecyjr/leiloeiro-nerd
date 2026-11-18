@@ -30,14 +30,14 @@ Widget
 
 São duas chamadas de IA, com provedores e chaves independentes:
 
-| Etapa                          | Provedor                                    | Chave                   |
-| ------------------------------ | ------------------------------------------- | ----------------------- |
-| Embeddings (indexação e busca) | Gemini, pelo endpoint compatível com OpenAI | `GEMINI_API_KEY` |
-| Resposta final do chat         | OpenRouter                                  | `OPENROUTER_API_KEY`    |
+| Etapa                          | Provedor                                    | Chave                |
+| ------------------------------ | ------------------------------------------- | -------------------- |
+| Embeddings (indexação e busca) | Gemini, pelo endpoint compatível com OpenAI | `GEMINI_API_KEY`     |
+| Resposta final do chat         | OpenRouter                                  | `OPENROUTER_API_KEY` |
 
 Pontos importantes do comportamento:
 
-- A busca usa **só a última mensagem do usuário**. Uma pergunta de acompanhamento sem contexto próprio ("e o prazo?") pode não achar nada, mesmo que a conversa anterior deixe claro o assunto.
+- A busca considera o histórico: uma pergunta curta (menos de 80 caracteres, como "e o prazo?") é buscada junto com as duas últimas perguntas do usuário; uma pergunta longa busca sozinha. As respostas do assistente não entram no texto da busca, e não há chamada extra ao modelo (`src/lib/ai/search-query.ts`).
 - Se nenhum trecho passar do threshold, o prompt avisa a IA para dizer que não encontrou a informação, em vez de inventar.
 - Se a busca falhar por outro motivo (chave inválida, limite do plano gratuito), o chat **continua sem contexto** e o erro aparece só no terminal do servidor.
 - Se o índice não existir, a rota responde 500 pedindo para rodar `pnpm knowledge:index`.
@@ -47,17 +47,17 @@ Pontos importantes do comportamento:
 
 Variáveis no `.env` (modelo em `.env.example`):
 
-| Variável                 | Obrigatória | Padrão                               | Para que serve                                   |
-| ------------------------ | ----------- | ------------------------------------ | ------------------------------------------------ |
-| `OPENROUTER_API_KEY`     | sim         | n/d                                  | Resposta final do chat                           |
-| `OPENROUTER_MODEL`       | não         | `openrouter/auto`                    | Modelo usado na resposta                         |
-| `GEMINI_API_KEY`  | sim         | n/d                                  | Embeddings (chave do Google AI Studio)           |
-| `EMBEDDING_MODEL` | não         | `gemini-embedding-001`               | Modelo de embeddings                             |
-| `OPENAI_BASE_URL`        | não         | endpoint OpenAI-compatível do Gemini | Troca de provedor de embeddings                  |
-| `RAG_TOP_K`              | não         | `5`                                  | Máximo de trechos enviados à IA                  |
-| `RAG_MIN_SCORE`          | não         | `0.7`                                | Similaridade mínima (0 a 1) para um trecho valer |
-| `RAG_KNOWLEDGE_DIR`      | não         | `knowledge`                          | Pasta dos Markdown                               |
-| `RAG_INDEX_PATH`         | não         | `data/knowledge-index.json`          | Arquivo do índice                                |
+| Variável             | Obrigatória | Padrão                               | Para que serve                                   |
+| -------------------- | ----------- | ------------------------------------ | ------------------------------------------------ |
+| `OPENROUTER_API_KEY` | sim         | n/d                                  | Resposta final do chat                           |
+| `OPENROUTER_MODEL`   | não         | `openrouter/auto`                    | Modelo usado na resposta                         |
+| `GEMINI_API_KEY`     | sim         | n/d                                  | Embeddings (chave do Google AI Studio)           |
+| `EMBEDDING_MODEL`    | não         | `gemini-embedding-001`               | Modelo de embeddings                             |
+| `OPENAI_BASE_URL`    | não         | endpoint OpenAI-compatível do Gemini | Troca de provedor de embeddings                  |
+| `RAG_TOP_K`          | não         | `5`                                  | Máximo de trechos enviados à IA                  |
+| `RAG_MIN_SCORE`      | não         | `0.7`                                | Similaridade mínima (0 a 1) para um trecho valer |
+| `RAG_KNOWLEDGE_DIR`  | não         | `knowledge`                          | Pasta dos Markdown                               |
+| `RAG_INDEX_PATH`     | não         | `data/knowledge-index.json`          | Arquivo do índice                                |
 
 O nome `OPENAI_*` vem do SDK usado: os embeddings são chamados pelo pacote `openai`, apontado para o Gemini.
 
@@ -174,21 +174,21 @@ Os testes do chatbot não chamam nenhuma API (tudo é simulado) e rodam sem chav
 
 ## Problemas comuns
 
-| Sintoma                                                     | Causa provável                                                                       | O que fazer                                                         |
-| ----------------------------------------------------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------- |
-| `429 ... credit_balance_exhausted` ao indexar               | Provedor de embeddings sem créditos (ou limite do plano gratuito)                    | Confira a chave e a cota no provedor; espere o limite renovar       |
-| `GEMINI_API_KEY não configurada.`                    | Chave ausente no `.env`                                                              | Preencha e rode o comando de novo                                   |
-| Chat responde 500 "Base de conhecimento ainda não indexada" | `data/knowledge-index.json` não existe                                               | `pnpm knowledge:index`                                              |
+| Sintoma                                                     | Causa provável                                                                       | O que fazer                                                                                   |
+| ----------------------------------------------------------- | ------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------- |
+| `429 ... credit_balance_exhausted` ao indexar               | Provedor de embeddings sem créditos (ou limite do plano gratuito)                    | Confira a chave e a cota no provedor; espere o limite renovar                                 |
+| `GEMINI_API_KEY não configurada.`                           | Chave ausente no `.env`                                                              | Preencha e rode o comando de novo                                                             |
+| Chat responde 500 "Base de conhecimento ainda não indexada" | `data/knowledge-index.json` não existe                                               | `pnpm knowledge:index`                                                                        |
 | Erro "conta da OpenRouter está sem créditos" no widget      | `openrouter/auto` precisa de créditos comprados                                      | Compre créditos (openrouter.ai/settings/credits) ou use um modelo `:free` em OPENROUTER_MODEL |
-| Erro "Chave da OpenRouter inválida" no widget             | `OPENROUTER_API_KEY` incorreta                                                       | Confira a chave em openrouter.ai/keys e o `.env`                     |
-| Chat diz "não encontrei" para tudo                          | Busca falhando em silêncio, threshold alto demais, ou índice gerado com outro modelo | Veja o terminal do servidor; rode `pnpm knowledge:search`; reindexe |
-| Mudou um `.md` e a resposta não mudou                       | Índice não regenerado, ou servidor com o índice antigo em memória                    | `pnpm knowledge:index` e reinicie o servidor                        |
-| Trocou o modelo de embeddings e a busca parou               | Vetores de tamanhos diferentes no índice                                             | Reindexe com o modelo novo (o erro aparece só no terminal)          |
-| Chat traz trechos sem relação com a pergunta                | Threshold baixo demais                                                               | Calibre o `RAG_MIN_SCORE`                                           |
+| Erro "Chave da OpenRouter inválida" no widget               | `OPENROUTER_API_KEY` incorreta                                                       | Confira a chave em openrouter.ai/keys e o `.env`                                              |
+| Chat diz "não encontrei" para tudo                          | Busca falhando em silêncio, threshold alto demais, ou índice gerado com outro modelo | Veja o terminal do servidor; rode `pnpm knowledge:search`; reindexe                           |
+| Mudou um `.md` e a resposta não mudou                       | Índice não regenerado, ou servidor com o índice antigo em memória                    | `pnpm knowledge:index` e reinicie o servidor                                                  |
+| Trocou o modelo de embeddings e a busca parou               | Vetores de tamanhos diferentes no índice                                             | Reindexe com o modelo novo (o erro aparece só no terminal)                                    |
+| Chat traz trechos sem relação com a pergunta                | Threshold baixo demais                                                               | Calibre o `RAG_MIN_SCORE`                                                                     |
 
 ## Limitações conhecidas
 
-- A busca considera só a última mensagem, sem o histórico da conversa.
+- A busca com histórico é uma regra simples (mensagens do usuário, sem reescrever a pergunta). Uma pergunta curta que muda de assunto de repente pode herdar o tema anterior.
 - A camada de compatibilidade OpenAI do Gemini está em beta e não documenta `input` em lote para embeddings. O código tenta o lote e cai para um request por texto se o provedor recusar, o que deixa a indexação mais lenta em bases grandes.
 - O índice em JSON é lido inteiro na memória. Serve bem para dezenas ou poucas centenas de trechos.
 - O `data/knowledge-index.json` não é versionado: gere o índice em cada ambiente (desenvolvimento, CI, produção) depois do deploy.
@@ -198,4 +198,4 @@ Os testes do chatbot não chamam nenhuma API (tudo é simulado) e rodam sem chav
 - **PostgreSQL + pgvector:** a busca passa pela interface `KnowledgeRetriever` (`src/domain/rag/types.ts`). Basta criar uma `PgVectorKnowledgeRetriever` que implemente `search()` e trocá-la em `src/lib/rag/search.ts`; a rota e o chatbot não mudam. O vetor ficaria numa coluna `vector` da mesma base já usada pelo Drizzle.
 - **Dados dinâmicos:** consulta de itens, lances, status e prazos via Tools/API, separada do RAG (que continua cobrindo FAQ, regras e editais).
 - **Mostrar as fontes** da resposta no widget, usando os metadados já guardados.
-- **Usar o histórico na busca**, reescrevendo a pergunta de acompanhamento antes de gerar o embedding.
+- **Reescrever a pergunta de acompanhamento com o modelo** antes do embedding, se a regra local de histórico não bastar (custa uma chamada a mais por mensagem).
