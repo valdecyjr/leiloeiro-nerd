@@ -10,6 +10,7 @@ import { toDashboardItemRow } from "./dashboard-item-row";
 import { BecomeSellerForm } from "@/components/become-seller-form";
 import { firstValue } from "@/lib/first-value";
 import { PageHeader } from "@/components/layout/page-header";
+import { PageContainer } from "@/components/layout/page-container";
 
 export const dynamic = "force-dynamic";
 
@@ -48,18 +49,25 @@ export default async function ItemsPage({ searchParams }: PageProps<"/dashboard/
   // leiloeiro nao ganha `actions`: nao ha item novo para criar sem esse papel.
   if (session.user.role !== "seller" && session.user.role !== "both") {
     return (
-      <div className="min-h-screen flex flex-col bg-background">
-        <main className="flex-1 space-y-6 px-4 py-6 sm:px-6 lg:px-8">
-          <PageHeader title="Meus itens" />
+      <PageContainer size="wide">
+<PageHeader title="Meus itens" />
           <p className="text-muted-foreground">Você ainda não é leiloeiro.</p>
             <BecomeSellerForm />
-        </main>
-      </div>
+        </PageContainer>
     );
   }
 
   const params = await searchParams;
   const view = parseDashboardParams((name) => firstValue(params[name]));
+  // ponytail: o `?cobranca=` vem do botão "Gerar cobrança" (redirect da
+  // action). O valor é FECHADO de propósito — só `gerada`/`erro` existem, e o
+  // texto é fixo: query string nunca vira texto livre na página.
+  const cobrancaFlash =
+    params.cobranca === "gerada"
+      ? "Cobrança gerada para o arrematante vencedor."
+      : params.cobranca === "erro"
+        ? "Não foi possível gerar a cobrança — confira se o item teve lances e sua conta Mercado Pago nas configurações."
+        : null;
   const { items, total } = await listSellerItems(
     drizzleItemRepository,
     session.user.id,
@@ -84,9 +92,8 @@ export default async function ItemsPage({ searchParams }: PageProps<"/dashboard/
   }
 
   return (
-    <div className="min-h-screen flex flex-col bg-background">
-      <main className="flex-1 space-y-6 px-4 py-6 sm:px-6 lg:px-8">
-        <PageHeader
+    <PageContainer size="wide">
+<PageHeader
           title="Meus itens"
           actions={
             <Button nativeButton={false} render={<Link href="/dashboard/items/new" />} size="sm">
@@ -94,8 +101,15 @@ export default async function ItemsPage({ searchParams }: PageProps<"/dashboard/
             </Button>
           }
         />
+        {cobrancaFlash ? (
+          <p
+            role="status"
+            className={`text-sm ${params.cobranca === "gerada" ? "text-emerald-600" : "text-destructive"}`}
+          >
+            {cobrancaFlash}
+          </p>
+        ) : null}
         <ItemsUrl items={items.map(toDashboardItemRow)} view={view} totalCount={total} />
-      </main>
-    </div>
+      </PageContainer>
   );
 }

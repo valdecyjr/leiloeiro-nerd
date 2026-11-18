@@ -1,54 +1,8 @@
 import { describe, it, expect } from "vitest";
-import type { CreatePaymentInput, Payment, PaymentRepository } from "./payment-repository";
+import type { CreatePaymentInput } from "./payment-repository";
+import { FakePaymentRepository } from "@/test/fakes/payment-repository";
 
-class FakePaymentRepository implements PaymentRepository {
-  payments: Payment[] = [];
 
-  async createPayment(input: CreatePaymentInput): Promise<Payment> {
-    const payment: Payment = {
-      id: "pay-1",
-      itemId: input.itemId,
-      bidderId: input.bidderId,
-      bidId: input.bidId,
-      amount: input.amount,
-      platformFeeCents: input.platformFeeCents,
-      sellerNetCents: input.sellerNetCents,
-      mpPaymentId: input.mpPaymentId,
-      pixQrCode: input.pixQrCode,
-      pixCopiaECola: input.pixCopiaECola,
-      paymentLink: input.paymentLink,
-      status: "pending",
-      deadline: input.deadline,
-      attemptNumber: input.attemptNumber ?? 1,
-      createdAt: new Date("2026-01-01T00:00:00Z"),
-      updatedAt: new Date("2026-01-01T00:00:00Z"),
-    };
-    this.payments.push(payment);
-    return payment;
-  }
-
-  async findById(id: string): Promise<Payment | null> {
-    return this.payments.find((p) => p.id === id) ?? null;
-  }
-
-  async findByItemId(itemId: string): Promise<Payment[]> {
-    return this.payments.filter((p) => p.itemId === itemId);
-  }
-
-  async findByChainIndex(itemId: string, attemptNumber: number): Promise<Payment | null> {
-    return this.payments.find((p) => p.itemId === itemId && p.attemptNumber === attemptNumber) ?? null;
-  }
-
-  async markCancelled(id: string): Promise<Payment | null> {
-    const payment = this.payments.find((p) => p.id === id);
-    if (!payment) {
-      return null;
-    }
-    payment.status = "cancelled";
-    payment.updatedAt = new Date("2026-01-01T00:00:00Z");
-    return payment;
-  }
-}
 
 function createPaymentInput(overrides: Partial<CreatePaymentInput> = {}): CreatePaymentInput {
   return {

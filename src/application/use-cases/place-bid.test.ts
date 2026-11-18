@@ -22,6 +22,7 @@ const baseItem: Item = {
   minBidIncrement: 500,
   bidDeadline: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
   paymentDeadlineDays: 3,
+  cascadeDeadlineDays: null,
   status: "active",
   createdAt: new Date(),
   updatedAt: new Date(),
@@ -181,7 +182,7 @@ class FakeNotificationRepository implements NotificationRepository {
   created: CreateNotificationInput | null = null;
   async create(input: CreateNotificationInput): Promise<Notification> {
     this.created = input;
-    return { id: "notif1", ...input, read: false, createdAt: new Date() };
+    return { id: "notif1", ...input, read: false, link: null, createdAt: new Date() };
   }
   async getUnreadCount() { return 0; }
   async listRecent() { return []; }

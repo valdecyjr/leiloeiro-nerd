@@ -1,24 +1,118 @@
 import { Queue, Worker } from "bullmq";
 import { closeExpiredItems } from "@/application/use-cases/close-expired-items";
+import { createPayment } from "@/application/use-cases/create-payment";
+import { verificarPrazos, sincronizarMp } from "@/application/use-cases/verificar-prazos";
+import { handlePaymentWebhook } from "@/application/use-cases/handle-payment-webhook";
 import { drizzleItemRepository } from "@/infrastructure/database/repositories/drizzle-item-repository";
-import { AUCTION_QUEUE, CLOSE_EXPIRED_EVERY_MS } from "./queue";
+import { createPagBankPaymentDeps } from "@/infrastructure/pagbank/create-payment-deps";
+import { drizzlePagBankSellerAccountRepository } from "@/infrastructure/database/repositories/drizzle-pagbank-seller-account-repository";
+import { getPagBankOrder } from "@/infrastructure/pagbank/orders";
+import {
+  AUCTION_QUEUE,
+  CLOSE_EXPIRED_EVERY_MS,
+  VERIFICAR_PRAZOS_EVERY_MS,
+  SINCRONIZAR_MP_EVERY_MS,
+} from "./queue";
 
+// ponytail (R1.6): registry de jobs — cada `if (job.name === ...)` que vivia
+// no handler virou UMA entrada neste mapa. Um job novo entra AQUI (uma linha
+// de configuração + uma função) e não editando o mesmo bloco de 90 linhas.
+// O scheduler e o handler percorrem a MESMA fonte — não há como o nome
+// agendado divergir do nome processado.
 const CLOSE_EXPIRED_JOB = "close-expired-items";
+const VERIFICAR_PRAZOS_JOB = "verificar-prazos";
+const SINCRONIZAR_MP_JOB = "sincronizar-mp";
+
+type JobHandler = (now: Date) => Promise<unknown>;
+
+const JOBS: Record<string, { every: number; run: JobHandler }> = {
+  [CLOSE_EXPIRED_JOB]: {
+    every: CLOSE_EXPIRED_EVERY_MS,
+    async run(now) {
+      const encerrados = await closeExpiredItems(drizzleItemRepository, now);
+      if (encerrados.length > 0) {
+        console.log(`[worker] ${encerrados.length} item(ns) expirado(s) encerrado(s): ${encerrados.join(", ")}`);
+      }
+      // A cobrança do arremate e GERADA no mesmo job do encerramento — a spec
+      // não deixa o item encerrado esperar um segundo gatilho.
+      let cobrancas = 0;
+      const paymentDeps = createPagBankPaymentDeps();
+      for (const itemId of encerrados) {
+        try {
+          await createPayment(paymentDeps, itemId, now);
+          cobrancas += 1;
+        } catch (err) {
+          console.error(`[worker] falha ao gerar cobranca do item ${itemId}:`, err);
+        }
+      }
+      return { encerrados: encerrados.length, cobrancas };
+    },
+  },
+  [VERIFICAR_PRAZOS_JOB]: {
+    every: VERIFICAR_PRAZOS_EVERY_MS,
+    async run(now) {
+      const resultado = await verificarPrazos(createPagBankPaymentDeps(), now);
+      if (resultado.expired || resultado.cascaded || resultado.cancelledItems) {
+        console.log(
+          `[worker] verificar-prazos: ${resultado.expired} vencido(s), ` +
+            `${resultado.cascaded} cascata(s), ${resultado.cancelledItems} item(ns) cancelado(s)`,
+        );
+      }
+      return resultado;
+    },
+  },
+  [SINCRONIZAR_MP_JOB]: {
+    every: SINCRONIZAR_MP_EVERY_MS,
+    async run(now) {
+      const deps = createPagBankPaymentDeps();
+      const resultado = await sincronizarMp(
+        {
+          paymentRepo: deps.paymentRepo,
+          handleWebhook: (mpPaymentId) =>
+            handlePaymentWebhook(
+              {
+                paymentRepo: deps.paymentRepo,
+                itemRepo: deps.itemRepo,
+                notifRepo: deps.notifRepo,
+                getAccessToken: deps.getAccessToken,
+                fetchStatus: {
+                fetchOrderStatus: async (token: string, id: string) => {
+                  const order = await getPagBankOrder(token, id);
+                  return {
+                    status: order.chargeStatus ?? order.status,
+                    statusDetail: null,
+                    externalReference: order.referenceId,
+                  };
+                },
+              },
+                resend: deps.resend,
+                userRepo: deps.userRepo,
+                connectedSellerIds: () =>
+                  drizzlePagBankSellerAccountRepository.listUserIds(),
+              },
+              mpPaymentId,
+            ),
+        },
+        now,
+      );
+      if (resultado.checked > 0) {
+        console.log(`[worker] sincronizar-mp: ${resultado.checked} pagamento(ns) reconciliado(s)`);
+      }
+      return resultado;
+    },
+  },
+};
 
 const worker = new Worker(
   AUCTION_QUEUE,
   async (job) => {
-    if (job.name !== CLOSE_EXPIRED_JOB) {
-      console.log(`[worker] processando job "${job.name}":`, job.data);
+    const handler = JOBS[job.name];
+    if (!handler) {
+      console.log(`[worker] job desconhecido "${job.name}":`, job.data);
       return;
     }
-    // Um unico `Date` para todos os itens desta execucao: dois itens que venceram
-    // no mesmo minuto caem no mesmo dia, independente de quanto o UPDATE levou.
-    const encerrados = await closeExpiredItems(drizzleItemRepository, new Date());
-    if (encerrados.length > 0) {
-      console.log(`[worker] ${encerrados.length} item(ns) expirado(s) encerrado(s): ${encerrados.join(", ")}`);
-    }
-    return { encerrados: encerrados.length };
+    const now = new Date();
+    return handler.run(now);
   },
   { connection: { url: process.env.REDIS_URL } },
 );
@@ -26,46 +120,19 @@ const worker = new Worker(
 worker.on("ready", () => console.log("[worker] BullMQ worker conectado ao Redis"));
 worker.on("failed", (job, err) => console.error(`[worker] falha no job ${job?.id}`, err));
 
-// ponytail: o `upsertJobScheduler` roda no START do worker e nao num cron externo
-// (cron do SO, Kubernetes CronJob, Vercel Cron). Um agendador declarativo
-// registraria o MESMO job toda vez que subisse outra replica; o
-// `upsertJobScheduler` deduplica pelo par `jobId` + `every`, entao N replicas
-// continuam sendo N execucoes por janela — o que se quer para um UPDATE
-// idempotente — e nao ha nenhuma configuracao fora do repositorio para lembrar. O
-// `jobId` estavel e o que faz a deduplicacao valer entre deploys.
-//
-// E por isso que isto NAO e `await` no topo do arquivo: este arquivo roda por
-// `tsx watch`, fora do bundler do Next, e o `package.json` nao declara
-// `"type": "module"`. O `tsc --noEmit` passa (o `module: esnext` do tsconfig
-// permite top-level await) e mesmo assim o `node` recusa em CommonJS — um
-// gate que nao pegaria. Entao tudo que precisa esperar mora aqui dentro.
 async function main(): Promise<void> {
-  // ponytail: falha alto e logo, em vez de deixar o BullMQ e o drizzle caírem no
-  // `localhost:6379` / no banco local sem dizer nada. O `watch` que este script
-  // usava antes tornava isso pior a cada save: reiniciar o worker reexecutava
-  // este `main()`, re-registrava o agendador e escrevia de novo. Um worker que
-  // "funciona" apontando para o banco errado é o pior modo de falha possível
-  // aqui — ele encerra itens de verdade e reporta sucesso no console.
   const redisUrl = process.env.REDIS_URL;
   if (!redisUrl) throw new Error("REDIS_URL ausente: o worker fecharia itens de expirados no Redis local");
   if (!process.env.DATABASE_URL) throw new Error("DATABASE_URL ausente: o worker fecharia itens no banco local");
 
-  // O host no log e o que permite enxergar o alvo antes do primeiro `UPDATE`.
   const host = (url: string) => new URL(url).host;
-  console.log(
-    `[worker] alvo: redis=${host(redisUrl)} banco=${host(process.env.DATABASE_URL)} ` +
-      `| expirados a cada ${CLOSE_EXPIRED_EVERY_MS / 1000}s`,
-  );
+  console.log(`[worker] alvo: redis=${host(redisUrl)} banco=${host(process.env.DATABASE_URL)}`);
 
   const fila = new Queue(AUCTION_QUEUE, { connection: { url: redisUrl } });
-  await fila.upsertJobScheduler(
-    CLOSE_EXPIRED_JOB,
-    { every: CLOSE_EXPIRED_EVERY_MS },
-    { name: CLOSE_EXPIRED_JOB },
-  );
-  console.log(
-    `[worker] agendado "${CLOSE_EXPIRED_JOB}" a cada ${CLOSE_EXPIRED_EVERY_MS / 1000}s`,
-  );
+  for (const [nome, { every }] of Object.entries(JOBS)) {
+    await fila.upsertJobScheduler(nome, { every }, { name: nome });
+    console.log(`[worker] agendado "${nome}" a cada ${every / 1000}s`);
+  }
 
   process.on("SIGTERM", async () => {
     await worker.close();

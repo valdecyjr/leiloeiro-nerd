@@ -12,8 +12,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { createItemAction, updateItemAction } from "@/presentation/actions/item-actions";
 import { uploadItemImagesAction } from "@/presentation/actions/upload-actions";
-import { itemSchema } from "@/lib/validators";
-import { toInputDateString } from "@/lib/timezone";
+import { itemSchema } from "@/domain/validation/validators";
+import { toInputDateString } from "@/domain/timezone";
+import { SmartImage } from "@/components/smart-image";
 import { TYPE_LABELS, type Item } from "@/domain/repositories/item-repository";
 
 type ItemInput = z.input<typeof itemSchema>;
@@ -62,7 +63,7 @@ export function ItemForm({ item, mode }: { item?: Item | null; mode: "create" | 
   // porque o input e uma HORA DE PAREDE sem fuso: o `toISOString()` usava o
   // fuso do PROCESSO, e num servidor em UTC o vendedor via 01/10 02:59 no lugar
   // dos 30/09 23:59 que ele digitou. A volta (ler de volta) e `fromInputDateString`, em
-  // `@/lib/validators` — os dois lados leem `APP_TIMEZONE`, entao o round-trip e exato em
+  // `@/domain/validation/validators` — os dois lados leem `APP_TIMEZONE`, entao o round-trip e exato em
   // qualquer maquina. Ver o ponytail de `fromInputDateString`.
   const formattedDate = item?.bidDeadline ? toInputDateString(item.bidDeadline) : undefined;
 
@@ -104,8 +105,7 @@ export function ItemForm({ item, mode }: { item?: Item | null; mode: "create" | 
           <div className="flex flex-wrap gap-2">
             {urls.map((url) => (
               <div key={url} className="relative">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img src={url} alt="" className="h-16 w-16 rounded-md object-cover" />
+                <SmartImage src={url} alt="" width={64} height={64} className="h-16 w-16 rounded-md" />
                 <button
                   type="button"
                   onClick={() => removeUrl(url)}

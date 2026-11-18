@@ -1,4 +1,4 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNull, lte, sql } from "drizzle-orm";
 import { db } from "@/infrastructure/database/drizzle";
 import { payments } from "@/infrastructure/database/schema";
 import type {
@@ -28,6 +28,7 @@ export function mapPayment(row: PaymentRow): Payment {
     status: row.status,
     deadline: row.deadline,
     attemptNumber: row.attemptNumber,
+    reminderSentAt: row.reminderSentAt,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -65,6 +66,15 @@ export const drizzlePaymentRepository: PaymentRepository = {
     return row ? mapPayment(row) : null;
   },
 
+  async findByMpPaymentId(mpPaymentId: string): Promise<Payment | null> {
+    const [row] = await db
+      .select()
+      .from(payments)
+      .where(eq(payments.mpPaymentId, mpPaymentId))
+      .limit(1);
+    return row ? mapPayment(row) : null;
+  },
+
   async findByItemId(itemId: string): Promise<Payment[]> {
     const rows = await db
       .select()
@@ -87,6 +97,129 @@ export const drizzlePaymentRepository: PaymentRepository = {
       .update(payments)
       .set({ status: "cancelled", updatedAt: new Date() })
       .where(eq(payments.id, id))
+      .returning();
+    return row ? mapPayment(row) : null;
+  },
+
+  async markApproved(id: string): Promise<Payment | null> {
+    // Transição ÚNICA pending → approved: só quem muda devolve a linha
+    // (ver o contrato no `PaymentRepository.markApproved`). O `status` no
+    // SET usa `as const` implícito do enum do drizzle.
+    const [row] = await db
+      .update(payments)
+      .set({ status: "approved", updatedAt: new Date() })
+      .where(and(eq(payments.id, id), eq(payments.status, "pending")))
+      .returning();
+    return row ? mapPayment(row) : null;
+  },
+
+  async markExpired(id: string): Promise<Payment | null> {
+    // Mesma transição condicional do markApproved: o cron não pode vencer o
+    // pagamento que o webhook acabou de aprovar.
+    const [row] = await db
+      .update(payments)
+      .set({ status: "expired", updatedAt: new Date() })
+      .where(and(eq(payments.id, id), eq(payments.status, "pending")))
+      .returning();
+    return row ? mapPayment(row) : null;
+  },
+
+  async findExpiredPending(now: Date): Promise<Payment[]> {
+    const rows = await db
+      .select()
+      .from(payments)
+      .where(and(eq(payments.status, "pending"), lte(payments.deadline, now)));
+    return rows.map(mapPayment);
+  },
+
+  async findCascadeCandidates(): Promise<Payment[]> {
+    // A cadeia quebrou por EXPIRAÇÃO ou por CANCELAMENTO — os dois caminhos
+    // chamam o próximo da fila (ver o contrato no domínio).
+    //
+    // ponytail: `NOT EXISTS` no SUBQUERY é o que impede esta consulta de
+    // crescer infinito. Sem ele, TODO payment expirado/cancelado do banco
+    // voltava a cada 10 minutos — mesmo os de CASCATAS já concluídas (que
+    // têm a tentativa seguinte e são `continue` no use case). O NOT EXISTS
+    // devolve só o TOPO de cada cadeia quebrada: o último `expired`/
+    // `cancelled` SEM sucessor, que é exatamente o que a cascata precisa.
+    // O use case continua fazendo `findByChainIndex` (defesa em profundidade
+    // para quem chamar a porta fora do cron), mas a CONSULTA não devolve
+    // ruído.
+    const rows = await db
+      .select()
+      .from(payments)
+      .where(
+        and(
+          inArray(payments.status, ["expired", "cancelled"]),
+          sql`NOT EXISTS (
+            SELECT 1 FROM payments p2
+            WHERE p2.item_id = ${payments.itemId}
+              AND p2.attempt_number = ${payments.attemptNumber} + 1
+          )`,
+        ),
+      );
+    return rows.map(mapPayment);
+  },
+
+  async findPendingCreatedBefore(cutoff: Date): Promise<Payment[]> {
+    const rows = await db
+      .select()
+      .from(payments)
+      .where(and(eq(payments.status, "pending"), lte(payments.createdAt, cutoff)));
+    return rows.map(mapPayment);
+  },
+
+  async findPendingReminderDue(windowStart: Date, windowEnd: Date): Promise<Payment[]> {
+    // Pendentes que vencem DENTRO da janela e ainda não foram lembrados. O
+    // `reminderSentAt IS NULL` é o que impede o reenvio a cada tick.
+    const rows = await db
+      .select()
+      .from(payments)
+      .where(
+        and(
+          eq(payments.status, "pending"),
+          gte(payments.deadline, windowStart),
+          lte(payments.deadline, windowEnd),
+          isNull(payments.reminderSentAt),
+        ),
+      );
+    return rows.map(mapPayment);
+  },
+
+  async setMpPaymentId(id: string, mpPaymentId: string): Promise<Payment | null> {
+    // Só em `pending`: a adoção acontece quando o CARTÃO paga uma cobrança
+    // que ainda está em aberto — depois disso os webhooks casam pelo id novo.
+    const [row] = await db
+      .update(payments)
+      .set({ mpPaymentId, updatedAt: new Date() })
+      .where(and(eq(payments.id, id), eq(payments.status, "pending")))
+      .returning();
+    return row ? mapPayment(row) : null;
+  },
+
+  async findPendingByItemIds(itemIds: string[]): Promise<Map<string, Payment>> {
+    if (itemIds.length === 0) return new Map();
+    const rows = await db
+      .select()
+      .from(payments)
+      .where(and(inArray(payments.itemId, itemIds), eq(payments.status, "pending")));
+    const map = new Map<string, Payment>();
+    for (const row of rows) {
+      // o MAIOR attemptNumber ganha: é a cobrança VIVA da cascata
+      const existing = map.get(row.itemId);
+      if (!existing || row.attemptNumber > existing.attemptNumber) {
+        map.set(row.itemId, mapPayment(row));
+      }
+    }
+    return map;
+  },
+
+  async markReminderSent(id: string, at: Date): Promise<Payment | null> {
+    // Reivindicação atômica: só o primeiro tick que chega marca (e envia).
+    const [row] = await db
+      .update(payments)
+      .set({ reminderSentAt: at, updatedAt: at })
+      .where(and(eq(payments.id, id), isNull(payments.reminderSentAt)))
       .returning();
     return row ? mapPayment(row) : null;
   },

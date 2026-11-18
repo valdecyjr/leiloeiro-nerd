@@ -77,10 +77,10 @@ export const payments = pgTable("payments", {
   bidId: uuid("bid_id").notNull().references(() => bids.id),
   amount: integer("amount").notNull(),
   // ponytail: o LEDGER da taxa de marketplace. O `application_fee` do
-  // Mercado Pago faz o split no dinheiro (95% vendedor / 5% plataforma), mas o
-  // split da MP não é consultável por item de forma barata — o par gravado AQUI
+  // PagBank faz o split no dinheiro (95% vendedor / 5% plataforma), mas o
+  // split da PagBank não é consultável por item de forma barata — o par gravado AQUI
   // é o que os KPIs do vendedor e da plataforma leem, e o que a auditoria
-  // confere contra o extrato da MP. `sellerNetCents = amount - platformFeeCents`,
+  // confere contra o extrato da PagBank. `sellerNetCents = amount - platformFeeCents`,
   // gravado junto para não derivar em leitura.
   platformFeeCents: integer("platform_fee_cents").notNull().default(0),
   sellerNetCents: integer("seller_net_cents").notNull().default(0),
@@ -91,18 +91,24 @@ export const payments = pgTable("payments", {
   status: paymentStatusEnum("status").notNull().default("pending"),
   deadline: timestamp("deadline", { withTimezone: true }).notNull(),
   attemptNumber: integer("attempt_number").notNull().default(1),
+  // ponytail: a marca de "lembrete de vencimento JÁ ENVIADO" para este
+  // pagamento. O cron de prazos roda a cada 10min: sem esta coluna, um
+  // pagamento nas últimas 24h de prazo receberia o e-mail `payment_due` 144
+  // vezes. O `markReminderSent` atômico (WHERE reminder_sent_at IS NULL) é
+  // quem garante que só o primeiro tick envia.
+  reminderSentAt: timestamp("reminder_sent_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [index("payments_item_id_idx").on(t.itemId), index("payments_status_deadline_idx").on(t.status, t.deadline)]);
 
-// ponytail: a conta Mercado Pago de cada LEILOEIRO, via OAuth (spec do
-// marketplace MP: o pagamento é criado com o token do vendedor — o dinheiro cai
+// ponytail: a conta PagBank de cada LEILOEIRO, via OAuth (spec do
+// marketplace PagBank: o pagamento é criado com o token do vendedor — o dinheiro cai
 // na conta DELE — e o `application_fee` da plataforma retém 5%).
-// `userId` é UNIQUE: uma conta MP por vendedor; reconectar substitui os tokens.
-// `refreshToken`/`tokenExpiresAt` existem porque o access token da MP expira
+// `userId` é UNIQUE: uma conta PagBank por vendedor; reconectar substitui os tokens.
+// `refreshToken`/`tokenExpiresAt` existem porque o access token da PagBank expira
 // (~180 dias) e a renovação é server-side, sem pedir nova autorização ao
 // vendedor. O token NUNCA vai ao cliente: a UI só sabe `connectedAt`.
-export const mpSellerAccounts = pgTable("mp_seller_accounts", {
+export const pagbankSellerAccounts = pgTable("pagbank_seller_accounts", {
   id: uuid("id").primaryKey().defaultRandom(),
   userId: text("user_id")
     .notNull()
@@ -110,7 +116,7 @@ export const mpSellerAccounts = pgTable("mp_seller_accounts", {
     .references(() => userTable.id, { onDelete: "cascade" }),
   accessToken: text("access_token").notNull(),
   refreshToken: text("refresh_token"),
-  mpUserId: text("mp_user_id"),
+  accountId: text("account_id"),
   tokenExpiresAt: timestamp("token_expires_at", { withTimezone: true }),
   connectedAt: timestamp("connected_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -123,6 +129,11 @@ export const notifications = pgTable("notifications", {
   title: text("title").notNull(),
   content: text("content").notNull(),
   read: boolean("read").notNull().default(false),
+  // ponytail (R7.1): o destino clicável da notificação (ex.: /dashboard/payments/{id}).
+  // O `content` continua sendo o TEXTO legível; o link é o que o leitor CLICA.
+  // Nullable: a maioria das notificações não tem para onde ir (lance superido
+  // vai para a vitrine, que já está visível no contexto).
+  link: text("link"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [index("notifications_user_id_idx").on(t.userId)]);
 export const userFavorites = pgTable(
